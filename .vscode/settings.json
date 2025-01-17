@@ -1,0 +1,23 @@
+{
+    "sqltools.connections": [
+        {
+            "previewLimit": 50,
+            "server": "localhost",
+            "port": 5432,
+            "driver": "PostgreSQL",
+            "name": "mimiciv_from_Cursor",
+            "database": "mimciv",
+            "username": "postgre"
+        },
+        {
+            "previewLimit": 50,
+            "server": "localhost",
+            "port": 5432,
+            "driver": "PostgreSQL",
+            "database": "mimiciv",
+            "username": "postgres",
+            "name": "coursor_mimiciv",
+            "password": "123456"
+        }
+    ]
+}
