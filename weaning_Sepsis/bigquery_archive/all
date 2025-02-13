@@ -1,0 +1,138 @@
+-- 创建模式（如果不存在）
+-- CREATE SCHEMA IF NOT EXISTS weaning_Sepsis;
+
+-- 创建或替换视图：筛选脓毒症并接受有创通气的患者，并应用年龄和首次ICU住院的排除条件
+-- CREATE OR REPLACE VIEW mimiciv.weaning_Sepsis.filter_sepis_InvasiveVent AS
+
+-- 基础患者队列：脓毒症 + 有创通气患者
+WITH previous_cohort AS ( 
+  -- 脓毒症患者队列
+  WITH sepsis_cohort AS (  
+    SELECT DISTINCT icu.subject_id,
+                    icu.hadm_id,
+                    icu.stay_id  
+    FROM `physionet-data.mimic_icu.icustays` icu  
+    INNER JOIN `physionet-data.mimic_derived.sepsis3` sepsis3  
+      ON icu.subject_id = sepsis3.subject_id  
+      AND icu.stay_id = sepsis3.stay_id 
+    WHERE sepsis3.sepsis3 = TRUE  -- 筛选脓毒症患者
+  ),  
+  -- 筛选有创通气患者
+  ventilated_cohort AS (  
+    SELECT DISTINCT sc.subject_id,
+                    sc.hadm_id,
+                    sc.stay_id
+    FROM sepsis_cohort sc  
+    INNER JOIN `physionet-data.mimic_derived.ventilation` vent  
+      ON sc.stay_id = vent.stay_id
+    WHERE vent.ventilation_status = 'InvasiveVent'  -- 筛选有创通气患者
+  ), 
+  -- 应用排除条件：年龄 >= 18岁且首次ICU住院
+  exclude_criteria AS (
+    SELECT DISTINCT vc.subject_id,
+                    vc.hadm_id,
+                    vc.stay_id  
+    FROM ventilated_cohort vc  
+    INNER JOIN `physionet-data.mimic_derived.icustay_detail` icu  
+      ON vc.subject_id = icu.subject_id  
+      AND vc.hadm_id = icu.hadm_id  
+      AND vc.stay_id = icu.stay_id  
+    WHERE icu.admission_age >= 18  -- 年龄 >= 18岁
+      AND icu.first_icu_stay = TRUE  -- 首次ICU住院
+  )  
+  -- 最终基础患者队列
+  SELECT DISTINCT subject_id,hadm_id,stay_id
+  FROM exclude_criteria
+),
+
+-- 获取所有有创通气结束时间作为潜在脱机时间点
+all_invasive_events AS (
+  SELECT 
+    pc.subject_id,
+    pc.hadm_id,
+    pc.stay_id,
+    vent.endtime AS weaning_time  -- 有创通气结束时间作为脱机时间点
+  FROM `physionet-data.mimic_derived.ventilation` vent
+  INNER JOIN previous_cohort pc
+    ON vent.stay_id = pc.stay_id
+  WHERE vent.ventilation_status = 'InvasiveVent'  -- 仅筛选有创通气事件
+),
+
+-- 获取每个脱机时间点后48小时内的事件
+post_weaning_events AS (
+  SELECT
+    base.stay_id,
+    base.weaning_time,
+    vent.ventilation_status,
+    vent.starttime,
+    vent.endtime
+  FROM all_invasive_events base
+  INNER JOIN `physionet-data.mimic_derived.ventilation` vent
+    ON base.stay_id = vent.stay_id
+    AND vent.starttime >= base.weaning_time  -- 事件发生在脱机时间之后
+    AND vent.starttime < TIMESTAMP_ADD(base.weaning_time, INTERVAL 48 HOUR)  -- 48小时观察窗口
+),
+
+-- 条件A：脱机后48小时内再次插管
+condition_reintubation AS (
+  SELECT 
+    stay_id,
+    weaning_time
+  FROM post_weaning_events
+  WHERE ventilation_status = 'InvasiveVent'  -- 筛选再次插管事件
+  GROUP BY stay_id, weaning_time
+),
+
+-- 条件B：脱机后48小时内死亡
+condition_mortality AS (
+  SELECT 
+    base.stay_id,
+    base.weaning_time
+  FROM all_invasive_events base
+  INNER JOIN `physionet-data.mimic_core.patients` pat
+    ON base.subject_id = pat.subject_id
+  WHERE pat.dod BETWEEN base.weaning_time 
+    AND TIMESTAMP_ADD(base.weaning_time, INTERVAL 48 HOUR)  -- 死亡时间在脱机后48小时内
+),
+
+-- 条件C：脱机后无创通气总时长计算
+condition_niv_duration AS (
+  SELECT
+    stay_id,
+    weaning_time,
+    -- 计算实际在48小时内的无创通气时长（小时）
+    SUM(TIMESTAMP_DIFF(
+      LEAST(endtime, TIMESTAMP_ADD(weaning_time, INTERVAL 48 HOUR)),
+      starttime,
+      SECOND
+    ) / 3600) AS niv_hours
+  FROM post_weaning_events
+  WHERE ventilation_status = 'NonInvasiveVent'  -- 筛选无创通气事件
+  GROUP BY stay_id, weaning_time
+)
+
+-- 最终结果集：计算脱机成功标志
+SELECT
+  base.subject_id,
+  base.hadm_id,
+  base.stay_id,
+  base.weaning_time,
+  CASE
+    WHEN reintub.stay_id IS NULL          -- 未再次插管
+      AND mort.stay_id IS NULL            -- 未发生死亡
+      AND COALESCE(niv.niv_hours, 0) < 48 -- 无创通气 < 48小时
+    THEN 1  -- 脱机成功
+    ELSE 0  -- 脱机失败
+  END AS weaning_success_flag
+FROM all_invasive_events base
+LEFT JOIN condition_reintubation reintub
+  ON base.stay_id = reintub.stay_id
+  AND base.weaning_time = reintub.weaning_time
+LEFT JOIN condition_mortality mort
+  ON base.stay_id = mort.stay_id
+  AND base.weaning_time = mort.weaning_time
+LEFT JOIN condition_niv_duration niv
+  ON base.stay_id = niv.stay_id
+  AND base.weaning_time = niv.weaning_time
+-- LIMIT 100  -- 测试时限制结果数量
+;
