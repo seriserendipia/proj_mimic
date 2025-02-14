@@ -1,0 +1,36 @@
+-- CREATE SCHEMA IF NOT EXISTS weaning_Sepsis;
+
+-- CREATE OR REPLACE VIEW mimiciv.weaning_Sepsis.filter_sepis_InvasiveVent AS
+-- This view filters patients with sepsis who have undergone invasive ventilation and applies exclusions based on age and first ICU stay.
+WITH sepsis_cohort AS (  
+  SELECT DISTINCT icu.subject_id
+  , icu.hadm_id, icu.stay_id  
+  FROM `physionet-data.mimic_icu.icustays` icu  
+  INNER JOIN `physionet-data.mimic_derived.sepsis3` sepsis3  
+    ON icu.subject_id = sepsis3.subject_id  
+    AND icu.stay_id = sepsis3.stay_id 
+  WHERE sepsis3.sepsis3 = TRUE
+),  
+-- Step 2: Filter for invasive ventilation  
+ventilated_cohort AS (  
+  SELECT DISTINCT sc.subject_id, sc.hadm_id, sc.stay_id
+  FROM sepsis_cohort sc  
+  INNER JOIN `physionet-data.mimic_derived.ventilation` vent  
+    ON sc.stay_id = vent.stay_id  
+  WHERE vent.ventilation_status = 'InvasiveVent'  
+), 
+exclude_criteria AS (
+-- Step 3: Apply exclusions  
+  SELECT DISTINCT vc.subject_id, vc.hadm_id, vc.stay_id  
+  FROM ventilated_cohort vc  
+  INNER JOIN `physionet-data.mimic_derived.icustay_detail` icu  
+    ON vc.subject_id = icu.subject_id  
+    AND vc.hadm_id = icu.hadm_id  
+    AND vc.stay_id = icu.stay_id  
+  WHERE icu.admission_age >= 18  
+    AND icu.first_icu_stay = TRUE  
+)  
+SELECT * 
+FROM exclude_criteria
+-- LIMIT 100
+;
