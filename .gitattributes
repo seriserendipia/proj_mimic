@@ -1,4 +1,6 @@
 *.csv filter=lfs diff=lfs merge=lfs -text
+device_associated_infection/data/classification_device_associated_infection.csv filter=lfs diff=lfs merge=lfs -text
+device_associated_infection/data/classification_device_associated_infection_not_null.csv filter=lfs diff=lfs merge=lfs -text
 *.zip filter=lfs diff=lfs merge=lfs -text
 *.sql filter=lfs diff=lfs merge=lfs -text
 *.ipynb filter=lfs diff=lfs merge=lfs -text
