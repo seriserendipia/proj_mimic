@@ -1,0 +1,8 @@
+device_associated_infection/data/classification_device_associated_infection.csv
+device_associated_infection/data/classification_device_associated_infection_not_null.csv
+
+*.csv
+
+# Ignore IDE specific files
+.vscode/
+.idea/
