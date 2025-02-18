@@ -1,138 +1,187 @@
--- 创建模式（如果不存在）
--- CREATE SCHEMA IF NOT EXISTS weaning_Sepsis;
 
--- 创建或替换视图：筛选脓毒症并接受有创通气的患者，并应用年龄和首次ICU住院的排除条件
--- CREATE OR REPLACE VIEW mimiciv.weaning_Sepsis.filter_sepis_InvasiveVent AS
+-- Create a new view that combines features from various tables
+CREATE OR REPLACE VIEW `arched-sorter-450805-v7.weaning_Sepsis.combined_features_view` AS
 
--- 基础患者队列：脓毒症 + 有创通气患者
-WITH previous_cohort AS ( 
-  -- 脓毒症患者队列
-  WITH sepsis_cohort AS (  
-    SELECT DISTINCT icu.subject_id,
-                    icu.hadm_id,
-                    icu.stay_id  
-    FROM `physionet-data.mimic_icu.icustays` icu  
-    INNER JOIN `physionet-data.mimic_derived.sepsis3` sepsis3  
-      ON icu.subject_id = sepsis3.subject_id  
-      AND icu.stay_id = sepsis3.stay_id 
-    WHERE sepsis3.sepsis3 = TRUE  -- 筛选脓毒症患者
-  ),  
-  -- 筛选有创通气患者
-  ventilated_cohort AS (  
-    SELECT DISTINCT sc.subject_id,
-                    sc.hadm_id,
-                    sc.stay_id
-    FROM sepsis_cohort sc  
-    INNER JOIN `physionet-data.mimic_derived.ventilation` vent  
-      ON sc.stay_id = vent.stay_id
-    WHERE vent.ventilation_status = 'InvasiveVent'  -- 筛选有创通气患者
-  ), 
-  -- 应用排除条件：年龄 >= 18岁且首次ICU住院
-  exclude_criteria AS (
-    SELECT DISTINCT vc.subject_id,
-                    vc.hadm_id,
-                    vc.stay_id  
-    FROM ventilated_cohort vc  
-    INNER JOIN `physionet-data.mimic_derived.icustay_detail` icu  
-      ON vc.subject_id = icu.subject_id  
-      AND vc.hadm_id = icu.hadm_id  
-      AND vc.stay_id = icu.stay_id  
-    WHERE icu.admission_age >= 18  -- 年龄 >= 18岁
-      AND icu.first_icu_stay = TRUE  -- 首次ICU住院
-  )  
-  -- 最终基础患者队列
-  SELECT DISTINCT subject_id,hadm_id,stay_id
-  FROM exclude_criteria
+WITH temp_pulmonary_infection_icd AS (
+    SELECT 9 AS icd_version, icd_code
+    FROM UNNEST([
+        '46430', '48284', '48239', '4843', '51189', '48230', '4871', '486', '46450', '5118', '4801',
+        '481', '8289', '4838', '4829', '4809', '46611', '48283', '46400', '4821', '4660', '4808',
+        '5111', '5110', '462', '4650', '48231', '4611', '46421', '4830', '4659', '48241', '463',
+        '4658', '485', '4802', '4848', '4618', '4613', '4820', '4800', '4846', '5119', '48249',
+        '46411', '46619', '48282', '48232', '4847', '4822', '48242', '4841', '4610', '4870', '5100',
+        '48281', '4619', '46451', '460', '46410', '4878', '46431', '5109', '51181', '48240', '4612'
+    ]) AS icd_code
+    UNION ALL
+    SELECT 10 AS icd_version, icd_code
+    FROM UNNEST([
+        'J151', 'J09X3', 'J09X1', 'J1289', 'J101', 'J156', 'J211', 'J0190', 'J0180', 'J0390',
+        'J0410', 'J0511', 'J09X9', 'J0141', 'J219', 'J205', 'J111', 'J1100', 'J120', 'J102',
+        'J129', 'J1529', 'J189', 'J153', 'J0120', 'J00', 'J123', 'J201', 'J154', 'J0191', 'J210',
+        'J209', 'J020', 'J155', 'J0411', 'J188', 'J17', 'J13', 'J122', 'J042', 'J158', 'J181', 'J15211',
+        'J218', 'J112', 'J0300', 'J1001', 'J1520', 'J851', 'J1008', 'J157', 'J1000', 'J208', 'J852',
+        'J22', 'J0380', 'J14', 'J869', 'J0130', 'J0391', 'J1089', 'J0140', 'J853', 'J040', 'J0431',
+        'J150', 'J204', 'J168', 'J182', 'J1081', 'J09X2', 'J180', 'J0430', 'J0301', 'J1108', 'J028',
+        'J0100', 'J860', 'J121', 'J0510', 'J850', 'J0110', 'J069', 'J029', 'J060', 'J1082', 'J1189',
+        'J1181', 'J159', 'J15212'
+    ]) AS icd_code
 ),
-
--- 获取所有有创通气结束时间作为潜在脱机时间点
-all_invasive_events AS (
-  SELECT 
-    pc.subject_id,
-    pc.hadm_id,
-    pc.stay_id,
-    vent.endtime AS weaning_time  -- 有创通气结束时间作为脱机时间点
-  FROM `physionet-data.mimic_derived.ventilation` vent
-  INNER JOIN previous_cohort pc
-    ON vent.stay_id = pc.stay_id
-  WHERE vent.ventilation_status = 'InvasiveVent'  -- 仅筛选有创通气事件
+temp_urinary_tract_infection_icd AS (
+    SELECT 9 AS icd_version, icd_code
+    FROM UNNEST([
+        '5990', '59010', '5950', '5959', '5909', '59080', '59000', '5903', '5902', '5952',
+        '59001', '59011', '59081', '5904', '5909'
+    ]) AS icd_code
+    UNION ALL
+    SELECT 10 AS icd_version, icd_code
+    FROM UNNEST([
+        'N390', 'N3000', 'N3001', 'N3090', 'N3091', 'N341', 'N300', 'N301', 'N302', 'N303',
+        'N304', 'N308', 'N309', 'N390'
+    ]) AS icd_code
 ),
-
--- 获取每个脱机时间点后48小时内的事件
-post_weaning_events AS (
-  SELECT
-    base.stay_id,
-    base.weaning_time,
-    vent.ventilation_status,
-    vent.starttime,
-    vent.endtime
-  FROM all_invasive_events base
-  INNER JOIN `physionet-data.mimic_derived.ventilation` vent
-    ON base.stay_id = vent.stay_id
-    AND vent.starttime >= base.weaning_time  -- 事件发生在脱机时间之后
-    AND vent.starttime < TIMESTAMP_ADD(base.weaning_time, INTERVAL 48 HOUR)  -- 48小时观察窗口
-),
-
--- 条件A：脱机后48小时内再次插管
-condition_reintubation AS (
-  SELECT 
-    stay_id,
-    weaning_time
-  FROM post_weaning_events
-  WHERE ventilation_status = 'InvasiveVent'  -- 筛选再次插管事件
-  GROUP BY stay_id, weaning_time
-),
-
--- 条件B：脱机后48小时内死亡
-condition_mortality AS (
-  SELECT 
-    base.stay_id,
-    base.weaning_time
-  FROM all_invasive_events base
-  INNER JOIN `physionet-data.mimic_core.patients` pat
-    ON base.subject_id = pat.subject_id
-  WHERE pat.dod BETWEEN base.weaning_time 
-    AND TIMESTAMP_ADD(base.weaning_time, INTERVAL 48 HOUR)  -- 死亡时间在脱机后48小时内
-),
-
--- 条件C：脱机后无创通气总时长计算
-condition_niv_duration AS (
-  SELECT
-    stay_id,
-    weaning_time,
-    -- 计算实际在48小时内的无创通气时长（小时）
-    SUM(TIMESTAMP_DIFF(
-      LEAST(endtime, TIMESTAMP_ADD(weaning_time, INTERVAL 48 HOUR)),
-      starttime,
-      SECOND
-    ) / 3600) AS niv_hours
-  FROM post_weaning_events
-  WHERE ventilation_status = 'NonInvasiveVent'  -- 筛选无创通气事件
-  GROUP BY stay_id, weaning_time
+temp_intestinal_infection_icd AS (
+    SELECT 9 AS icd_version, icd_code
+    FROM UNNEST([
+        '0090', '0088', '0085', '00843', '00849', '00861', '0091', '00844', '00845', '0080',
+        '0083', '00862', '0082', '0081', '00863'
+    ]) AS icd_code
+    UNION ALL
+    SELECT 10 AS icd_version, icd_code
+    FROM UNNEST([
+        'A049', 'A099', 'A080', 'A0811', 'A0819', 'A084', 'A082', 'A0831', 'A0832', 'A0839',
+        'A085', 'A088', 'A089', 'A041', 'A042'
+    ]) AS icd_code
 )
 
--- 最终结果集：计算脱机成功标志
-SELECT
-  base.subject_id,
-  base.hadm_id,
-  base.stay_id,
-  base.weaning_time,
-  CASE
-    WHEN reintub.stay_id IS NULL          -- 未再次插管
-      AND mort.stay_id IS NULL            -- 未发生死亡
-      AND COALESCE(niv.niv_hours, 0) < 48 -- 无创通气 < 48小时
-    THEN 1  -- 脱机成功
-    ELSE 0  -- 脱机失败
-  END AS weaning_success_flag
-FROM all_invasive_events base
-LEFT JOIN condition_reintubation reintub
-  ON base.stay_id = reintub.stay_id
-  AND base.weaning_time = reintub.weaning_time
-LEFT JOIN condition_mortality mort
-  ON base.stay_id = mort.stay_id
-  AND base.weaning_time = mort.weaning_time
-LEFT JOIN condition_niv_duration niv
-  ON base.stay_id = niv.stay_id
-  AND base.weaning_time = niv.weaning_time
--- LIMIT 100  -- 测试时限制结果数量
-;
+
+
+
+
+
+
+
+
+SELECT w.subject_id,
+       w.hadm_id,
+       w.stay_id,
+       w.weaning_time,
+       -- Features from 3_feature_extraction.sql
+       MIN(bg.ph)                               AS worst_ph_value,
+       MIN(bg.po2)                              AS worst_pao2,
+       MIN(bg.pco2)                             AS worst_pco2,
+       MIN(bg.baseexcess)                       AS worst_base_excess,
+       MIN(cbc.wbc)                             AS worst_white_blood_cell_count,
+       MIN(cbc.hemoglobin)                      AS worst_hemoglobin,
+       MIN(cbc.platelet)                        AS worst_platelet,
+       MIN(chem.creatinine)                     AS worst_creatinine,
+       MIN(chem.aniongap)                       AS worst_anion_gap,
+       MIN(vs.heart_rate)                       AS worst_heart_rate,
+       MIN(vs.resp_rate)                        AS worst_respiratory_rate,
+       MIN(vs.mbp)                              AS worst_mean_arterial_pressure,
+       MIN(vs.spo2)                             AS worst_peripheral_oxygen_saturation,
+       MIN(vs.temperature)                      AS worst_temperature,
+       MIN(bg.pao2fio2ratio)                    AS worst_oxygenation_index,
+       SUM(urine.urineoutput)                   AS urineoutput_24hr,
+       -- Features from 4_therapeutic_measures_extraction.sql
+       SUM(CASE
+               WHEN iv.ventilation_status = 'InvasiveVent' THEN
+                   EXTRACT(DAY FROM (iv.endtime - iv.starttime))
+               ELSE 0
+           END)                                 AS days_of_invasive_ventilation,
+       SUM(CASE
+               WHEN ab.starttime IS NOT NULL THEN
+                   EXTRACT(DAY FROM (ab.stoptime - ab.starttime))
+               ELSE 0
+           END)                                 AS days_of_antibiotic_use,
+       COUNT(DISTINCT cr.charttime)             AS days_of_crrt,
+       SUM(CASE
+               WHEN vp.starttime IS NOT NULL THEN
+                   EXTRACT(DAY FROM (vp.endtime - vp.starttime))
+               ELSE 0
+           END)                                 AS days_of_vasopressor_therapy,
+       -- Features from 5_sofa_gcs_saps_extraction.sql
+       MAX(sofa.sofa_24hours)                   AS max_sofa_score,
+       MAX(gcs.gcs)                             AS max_gcs_score,
+       MAX(saps.sapsii)                         AS max_saps_score,
+       MAX(charlson.charlson_comorbidity_index) AS comorbidity_index,
+       -- Features from 6_infection_classification_extraction.sql
+       CASE
+           WHEN EXISTS(
+                   SELECT 1
+                   FROM `physionet-data.mimiciv_3_1_hosp.diagnoses_icd` di
+                            INNER JOIN temp_pulmonary_infection_icd pi
+                                       ON di.icd_code LIKE CONCAT(pi.icd_code, '%')
+                                           AND di.icd_version = pi.icd_version
+                   WHERE di.subject_id = w.subject_id
+                     AND di.hadm_id = w.hadm_id
+               ) THEN 'Pulmonary infection'
+           WHEN EXISTS(
+                   SELECT 1
+                   FROM `physionet-data.mimiciv_3_1_hosp.diagnoses_icd` di
+                            INNER JOIN temp_urinary_tract_infection_icd uti
+                                       ON di.icd_code LIKE CONCAT(uti.icd_code, '%')
+                                           AND di.icd_version = uti.icd_version
+                   WHERE di.subject_id = w.subject_id
+                     AND di.hadm_id = w.hadm_id
+               ) THEN 'Urinary tract infection'
+           WHEN EXISTS(
+                   SELECT 1
+                   FROM `physionet-data.mimiciv_3_1_hosp.diagnoses_icd` di
+                            INNER JOIN temp_intestinal_infection_icd ii
+                                       ON di.icd_code LIKE CONCAT(ii.icd_code, '%')
+                                           AND di.icd_version = ii.icd_version
+                   WHERE di.subject_id = w.subject_id
+                     AND di.hadm_id = w.hadm_id
+               ) THEN 'Intestinal infection'
+           ELSE 'Other'
+           END                                  AS infection_classification
+
+
+FROM `arched-sorter-450805-v7.weaning_Sepsis.weaning_success_or_not_first_time_invasive_ventilation` AS w
+         LEFT JOIN
+     `physionet-data.mimic_derived.bg` AS bg
+     ON w.hadm_id = bg.hadm_id AND bg.charttime BETWEEN TIMESTAMP_SUB(w.weaning_time, INTERVAL 24 HOUR) AND w.weaning_time
+         LEFT JOIN
+     `physionet-data.mimic_derived.complete_blood_count` AS cbc
+     ON w.hadm_id = cbc.hadm_id AND cbc.charttime BETWEEN TIMESTAMP_SUB(w.weaning_time, INTERVAL 24 HOUR) AND w.weaning_time
+         LEFT JOIN
+     `physionet-data.mimic_derived.chemistry` AS chem
+     ON w.hadm_id = chem.hadm_id AND chem.charttime BETWEEN TIMESTAMP_SUB(w.weaning_time, INTERVAL 24 HOUR) AND w.weaning_time
+         LEFT JOIN
+     `physionet-data.mimic_derived.vitalsign` AS vs
+     ON w.stay_id = vs.stay_id AND vs.charttime BETWEEN TIMESTAMP_SUB(w.weaning_time, INTERVAL 24 HOUR) AND w.weaning_time
+         LEFT JOIN
+     `physionet-data.mimic_derived.urine_output` AS urine
+     ON w.stay_id = urine.stay_id AND urine.charttime BETWEEN TIMESTAMP_SUB(w.weaning_time, INTERVAL 24 HOUR) AND w.weaning_time
+         LEFT JOIN
+     `physionet-data.mimic_derived.ventilation` AS iv
+     ON w.stay_id = iv.stay_id AND iv.starttime BETWEEN TIMESTAMP_SUB(w.weaning_time, INTERVAL 24 HOUR) AND w.weaning_time
+         LEFT JOIN
+     `physionet-data.mimic_derived.antibiotic`AS ab
+     ON w.stay_id =  ab.stay_id AND ab.starttime BETWEEN TIMESTAMP_SUB(w.weaning_time, INTERVAL 24 HOUR) AND w.weaning_time
+         LEFT JOIN
+     `physionet-data.mimic_derived.crrt` AS cr
+     ON w.stay_id = cr.stay_id AND cr.charttime BETWEEN TIMESTAMP_SUB(w.weaning_time, INTERVAL 24 HOUR) AND w.weaning_time
+         LEFT JOIN
+     (SELECT stay_id, starttime, endtime FROM `physionet-data.mimic_derived.dobutamine`
+      UNION ALL
+      SELECT stay_id, starttime, endtime FROM `physionet-data.mimic_derived.dopamine`
+      UNION ALL
+      SELECT stay_id, starttime, endtime FROM `physionet-data.mimic_derived.epinephrine`) AS vp
+     ON w.stay_id = vp.stay_id AND vp.starttime BETWEEN TIMESTAMP_SUB(w.weaning_time, INTERVAL 24 HOUR) AND w.weaning_time
+         LEFT JOIN
+     `physionet-data.mimic_derived.sofa` AS sofa
+     ON w.stay_id = sofa.stay_id AND sofa.starttime BETWEEN TIMESTAMP_SUB(w.weaning_time, INTERVAL 24 HOUR) AND w.weaning_time
+         LEFT JOIN
+     `physionet-data.mimic_derived.gcs` AS gcs
+     ON w.stay_id = gcs.stay_id AND gcs.charttime BETWEEN TIMESTAMP_SUB(w.weaning_time, INTERVAL 24 HOUR) AND w.weaning_time
+         LEFT JOIN
+     `physionet-data.mimic_derived.sapsii` AS saps
+     ON w.stay_id = saps.stay_id AND saps.starttime BETWEEN TIMESTAMP_SUB(w.weaning_time, INTERVAL 24 HOUR) AND w.weaning_time
+         LEFT JOIN
+     `physionet-data.mimic_derived.charlson` AS charlson
+     ON w.hadm_id = charlson.hadm_id
+-- LEFT JOIN
+--     `physionet-data.mimiciv_3_1_hosp.diagnoses_icd` AS di ON w.subject_id = di.subject_id AND w.hadm_id = di.hadm_id
+GROUP BY w.subject_id, w.hadm_id, w.stay_id, w.weaning_time
+ORDER BY w.weaning_time;
